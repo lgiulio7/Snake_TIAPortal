@@ -6,3 +6,10 @@
 # and WinCC Comfort / Advanced (panel used TP2200)
 
 # The repo includes the single code files (for PLC) and the entire project that can be simulated
+
+# The program includes:
+# -Field 20x10 adjustable with system constants
+# -Adjustable speed
+# -Point system based on speed (with best score saving)
+# -Video controls Up/Down/Left/Right
+# -Start/Pause/Stop game buttons
