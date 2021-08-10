@@ -6,6 +6,7 @@
 # and WinCC Comfort / Advanced (panel used TP2200)
 
 # The repo includes the single code files (for PLC) and the entire project that can be simulated
+# Unfortunately Siemens sucks for versioning so all blocks are not present for versioning.
 
 # The program includes:
 # -Field 20x10 adjustable with system constants
