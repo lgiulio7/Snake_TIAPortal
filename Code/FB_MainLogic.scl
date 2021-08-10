@@ -1,0 +1,631 @@
+FUNCTION_BLOCK "FB_MainLogic"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR 
+      TON_Speed {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME;   // Timer used for game speed
+      ResetTimer { S7_SetPoint := 'True'} : Bool;
+      Fp_GameStart {InstructionName := 'R_TRIG'; LibVersion := '1.0'; S7_SetPoint := 'False'} : R_TRIG;   // Edge detection for game start
+      Fn_GameStart {InstructionName := 'F_TRIG'; LibVersion := '1.0'} : F_TRIG;
+      SnakeHeadHeightIndex { S7_SetPoint := 'True'} : DInt;   // Height index for snake head (used for starting the calculation loops for the movement)
+      SnakeHeadLengthIndex { S7_SetPoint := 'True'} : DInt;   // Length index for snake head (used for starting the calculation loops for the movement)
+      PreviousDirection : Int;
+      SnakeDirection : Int;   // Snake Direction
+   END_VAR
+
+   VAR_TEMP 
+      PointsToAdd : UDInt;
+      IndexHeight : DInt;
+      IndexLength : DInt;
+      RandomAppleHeight : DInt;   // Random height index where to generate the apple
+      RandomAppleLength : DInt;   // Random length index where to generate the apple
+      CollisionWithSnake : Bool;
+      CollisionWithWall : Bool;
+      GenerateApple : Bool;
+      ShiftFlag : Bool;   // Variable for snake movement
+      LengthIndexToCheck : DInt;
+      HeightIndexToCheck : DInt;
+      CheckSnakeLength : UDInt;
+      DirectionToCheck : Int;
+   END_VAR
+
+
+BEGIN
+	
+	REGION Game commands
+	    
+	    REGION Game start
+	        
+	        IF "DB_Commands".Cmd.Start AND NOT "DB_Commands".Sts.GameActive THEN
+	            IF "DB_Commands".Cmd.Speed > 0.0 THEN
+	                "DB_Commands".Sts.GameActive := TRUE;
+	                "DB_Commands".Sts.PauseActive := FALSE;
+	            END_IF;
+	            "DB_Commands".Cmd.Start := FALSE;
+	        ELSIF "DB_Commands".Sts.GameActive THEN
+	            "DB_Commands".Cmd.Start := FALSE;
+	        END_IF;
+	        
+	    END_REGION
+	    
+	    REGION Game stop
+	        
+	        IF "DB_Commands".Cmd.Stop OR ("DB_Commands".Cmd.Speed <= 0.0) THEN
+	            "DB_Commands".Sts.GameActive := FALSE;
+	            "DB_Commands".Sts.PauseActive := FALSE;
+	            "DB_Commands".Cmd.Stop := FALSE;
+	            "DB_Commands".Cmd.Start := FALSE;
+	        END_IF;
+	        
+	    END_REGION
+	    
+	    REGION Game Pause
+	        
+	        IF "DB_Commands".Cmd.Pause THEN
+	            IF "DB_Commands".Sts.GameActive THEN
+	                "DB_Commands".Sts.PauseActive := NOT "DB_Commands".Sts.PauseActive;
+	            ELSE
+	                "DB_Commands".Sts.PauseActive := FALSE;
+	            END_IF;
+	            "DB_Commands".Cmd.Pause := FALSE;
+	        END_IF;
+	        
+	    END_REGION
+	    
+	    REGION Game speed
+	        
+	        IF "DB_Commands".Cmd.Speed > 0.0 THEN
+	            
+	            #TON_Speed(IN := "DB_Commands".Sts.GameActive AND NOT "DB_Commands".Sts.PauseActive AND NOT #ResetTimer,
+	                       PT := REAL_TO_DINT((1.0 / "DB_Commands".Cmd.Speed) * 1000.0));
+	            
+	            #ResetTimer := #TON_Speed.Q;
+	            #ShiftFlag := #TON_Speed.Q;
+	            
+	        END_IF;
+	                   
+	    END_REGION
+	    
+	    REGION Game points
+	        
+	        #PointsToAdd := REAL_TO_UDINT("DB_Commands".Cmd.Speed * UDINT_TO_REAL("POINTS_BASE"));
+	        
+	    END_REGION
+	    
+	    REGION Snake movements
+	        
+	        IF "DB_Commands".Sts.GameActive AND NOT "DB_Commands".Sts.PauseActive THEN
+	            
+	            IF #ShiftFlag THEN
+	                
+	                //Up
+	                IF "DB_Commands".Cmd.SnakeUp THEN
+	                    IF #SnakeDirection <> "DIRECTION_DOWN" THEN
+	                        #SnakeDirection := "DIRECTION_UP";
+	                    END_IF;
+	                    "DB_Commands".Cmd.SnakeUp := FALSE;
+	                    //Down
+	                ELSIF "DB_Commands".Cmd.SnakeDown THEN
+	                    IF #SnakeDirection <> "DIRECTION_UP" THEN
+	                        #SnakeDirection := "DIRECTION_DOWN";
+	                    END_IF;
+	                    "DB_Commands".Cmd.SnakeDown := FALSE;
+	                    //Left
+	                ELSIF "DB_Commands".Cmd.SnakeLeft THEN
+	                    IF #SnakeDirection <> "DIRECTION_RIGHT" THEN
+	                        #SnakeDirection := "DIRECTION_LEFT";
+	                    END_IF;
+	                    "DB_Commands".Cmd.SnakeLeft := FALSE;
+	                    //Right
+	                ELSIF "DB_Commands".Cmd.SnakeRight THEN
+	                    IF #SnakeDirection <> "DIRECTION_LEFT" THEN
+	                        #SnakeDirection := "DIRECTION_RIGHT";
+	                    END_IF;
+	                    "DB_Commands".Cmd.SnakeRight := FALSE;
+	                END_IF;
+	                
+	            END_IF;
+	            
+	        ELSE
+	            "DB_Commands".Cmd.SnakeUp := FALSE;
+	            "DB_Commands".Cmd.SnakeDown := FALSE;
+	            "DB_Commands".Cmd.SnakeLeft := FALSE;
+	            "DB_Commands".Cmd.SnakeRight := FALSE;
+	        END_IF;
+	        
+	    END_REGION
+	    
+	END_REGION
+	
+	
+	REGION Game logic
+	    
+	    REGION Check start and snake + apple creation
+	        
+	        #Fp_GameStart(CLK := "DB_Commands".Sts.GameActive);
+	        
+	        IF #Fp_GameStart.Q THEN
+	            
+	            //Reset actual points
+	            "DB_Commands".Points.Actual := 0;
+	            
+	            //Reset previous game
+	            FOR #IndexHeight := 1 TO "FIELD_HEIGHT" DO
+	                FOR #IndexLength := 1 TO "FIELD_LENGTH" DO
+	                    "DB_Field".Field[#IndexHeight, #IndexLength].SnakePresence := FALSE;
+	                    "DB_Field".Field[#IndexHeight, #IndexLength].ApplePresence := FALSE;
+	                    "DB_Field".Field[#IndexHeight, #IndexLength].PreviousDirection := "DIRECTION_NONE";
+	                    "DB_Field".Field[#IndexHeight, #IndexLength].Shifted := FALSE;
+	                END_FOR;
+	            END_FOR;
+	            
+	            //Check for starting indexes
+	            #SnakeHeadHeightIndex := "FIELD_HEIGHT" / 2; //5
+	            #SnakeHeadLengthIndex := "FIELD_LENGTH" / 2; //10
+	            
+	            //Set right direction for starting
+	            #SnakeDirection := #PreviousDirection := "DIRECTION_RIGHT";
+	            
+	            FOR #IndexLength := #SnakeHeadLengthIndex TO (#SnakeHeadLengthIndex - "SNAKE_START_NUM" + 1) BY -1 DO
+	                "DB_Field".Field[#SnakeHeadHeightIndex, #IndexLength].SnakePresence := TRUE;
+	                "DB_Field".Field[#SnakeHeadHeightIndex, #IndexLength].PreviousDirection := #SnakeDirection;
+	                //Check for index bound
+	                IF #IndexLength <= 1 THEN
+	                    EXIT;
+	                END_IF;
+	            END_FOR;
+	            
+	            REGION Random number generation for apple
+	                
+	                //Generate random number for apple creation
+	                #RandomAppleHeight := "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_HEIGHT");
+	                #RandomAppleLength := "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_LENGTH");
+	                
+	                //Check if the numbers set are not already a snake block
+	                WHILE "DB_Field".Field[#RandomAppleHeight, #RandomAppleLength].SnakePresence DO
+	                    //First time checking
+	                    IF NOT "DB_Field".Field[#RandomAppleHeight, #RandomAppleLength].SnakePresence THEN
+	                        EXIT;
+	                    END_IF;
+	                    
+	                    //If there's the snake then change indexes
+	                    #RandomAppleHeight := #RandomAppleHeight + "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_HEIGHT");
+	                    #RandomAppleHeight := #RandomAppleHeight MOD "FIELD_HEIGHT";
+	                    #RandomAppleLength := #RandomAppleLength + "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_LENGTH");
+	                    #RandomAppleLength := #RandomAppleLength MOD "FIELD_LENGTH";
+	                    
+	                END_WHILE;
+	                
+	                //Set apple presence
+	                "DB_Field".Field[#RandomAppleHeight, #RandomAppleLength].ApplePresence := TRUE;
+	                
+	            END_REGION
+	            
+	        END_IF;
+	        
+	    END_REGION
+	    
+	    REGION Snake movement
+	        
+	        IF #ShiftFlag THEN
+	            
+	            //Reset collisions & vars
+	            #CollisionWithSnake := FALSE;
+	            #CollisionWithWall := FALSE;
+	            #GenerateApple := FALSE;
+	            
+	            //Reset Shifted vars
+	            FOR #IndexHeight := 1 TO "FIELD_HEIGHT" DO
+	                FOR #IndexLength := 1 TO "FIELD_LENGTH" DO
+	                    "DB_Field".Field[#IndexHeight, #IndexLength].Shifted := FALSE;
+	                END_FOR;
+	            END_FOR;
+	            
+	            //Check snake movement
+	            IF #SnakeDirection = "DIRECTION_RIGHT" THEN
+	                
+	                REGION Right direction
+	                    
+	                    //Check wall collision
+	                    IF (#SnakeHeadLengthIndex + 1) > "FIELD_LENGTH" THEN
+	                        #CollisionWithWall := TRUE;
+	                        "DB_Commands".Sts.GameActive := FALSE;
+	                    ELSE
+	                        //Check collision with other snake parts
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex + 1].SnakePresence THEN
+	                            #CollisionWithSnake := TRUE;
+	                            "DB_Commands".Sts.GameActive := FALSE;
+	                        END_IF;
+	                    END_IF;
+	                    
+	                    //Move if we have no collisions
+	                    IF NOT #CollisionWithWall AND NOT #CollisionWithSnake THEN
+	                        //Right direction starting with the head
+	                        //Shift snake head
+	                        "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex + 1].SnakePresence := "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex + 1].Shifted := TRUE;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex + 1].PreviousDirection := #PreviousDirection := "DIRECTION_RIGHT";
+	                        //If apple presence in the block then don't delete the snake presence to create the new block
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex + 1].ApplePresence THEN
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex + 1].ApplePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].Shifted := TRUE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_RIGHT";
+	                            #GenerateApple := TRUE;
+	                        ELSE
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_NONE";
+	                        END_IF;
+	                        //Set the new direction to check for snake movement
+	                        #DirectionToCheck := "DIRECTION_LEFT";
+	                        #LengthIndexToCheck := #SnakeHeadLengthIndex;
+	                        #HeightIndexToCheck := #SnakeHeadHeightIndex;
+	                        //And update the new snake head indexes
+	                        #SnakeHeadLengthIndex := #SnakeHeadLengthIndex + 1;
+	                        
+	                    END_IF;
+	                    
+	                END_REGION
+	                
+	            ELSIF #SnakeDirection = "DIRECTION_LEFT" THEN
+	                
+	                REGION Left direction
+	                    
+	                    //Check wall collision
+	                    IF (#SnakeHeadLengthIndex - 1) < 1 THEN
+	                        #CollisionWithWall := TRUE;
+	                        "DB_Commands".Sts.GameActive := FALSE;
+	                    ELSE
+	                        //Check collision with other snake parts
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex - 1].SnakePresence THEN
+	                            #CollisionWithSnake := TRUE;
+	                            "DB_Commands".Sts.GameActive := FALSE;
+	                        END_IF;
+	                    END_IF;
+	                    
+	                    //Move if we have no collisions
+	                    IF NOT #CollisionWithWall AND NOT #CollisionWithSnake THEN
+	                        //Right direction starting with the head
+	                        //Shift snake head
+	                        "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex - 1].SnakePresence := "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex - 1].Shifted := TRUE;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex - 1].PreviousDirection := #PreviousDirection := "DIRECTION_LEFT";
+	                        //If apple presence in the block then don't delete the snake presence to create the new block
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex - 1].ApplePresence THEN
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex - 1].ApplePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].Shifted := TRUE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_LEFT";
+	                            #GenerateApple := TRUE;
+	                        ELSE
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_NONE";
+	                        END_IF;
+	                        //Set the new direction to check for snake movement
+	                        #DirectionToCheck := "DIRECTION_RIGHT";
+	                        #LengthIndexToCheck := #SnakeHeadLengthIndex;
+	                        #HeightIndexToCheck := #SnakeHeadHeightIndex;
+	                        //And update the new snake head indexes
+	                        #SnakeHeadLengthIndex := #SnakeHeadLengthIndex - 1;
+	                        
+	                    END_IF;
+	                    
+	                END_REGION
+	                
+	            ELSIF #SnakeDirection = "DIRECTION_UP" THEN
+	                
+	                REGION Up direction
+	                    
+	                    //Check wall collision
+	                    IF (#SnakeHeadHeightIndex + 1) > "FIELD_HEIGHT" THEN
+	                        #CollisionWithWall := TRUE;
+	                        "DB_Commands".Sts.GameActive := FALSE;
+	                    ELSE
+	                        //Check collision with other snake parts
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex + 1, #SnakeHeadLengthIndex].SnakePresence THEN
+	                            #CollisionWithSnake := TRUE;
+	                            "DB_Commands".Sts.GameActive := FALSE;
+	                        END_IF;
+	                    END_IF;
+	                    
+	                    //Move if we have no collisions
+	                    IF NOT #CollisionWithWall AND NOT #CollisionWithSnake THEN
+	                        //Right direction starting with the head
+	                        //Shift snake head
+	                        "DB_Field".Field[#SnakeHeadHeightIndex + 1, #SnakeHeadLengthIndex].SnakePresence := "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex + 1, #SnakeHeadLengthIndex].Shifted := TRUE;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex + 1, #SnakeHeadLengthIndex].PreviousDirection := #PreviousDirection := "DIRECTION_UP";
+	                        //If apple presence in the block then don't delete the snake presence to create the new block
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex + 1, #SnakeHeadLengthIndex].ApplePresence THEN
+	                            "DB_Field".Field[#SnakeHeadHeightIndex + 1, #SnakeHeadLengthIndex].ApplePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].Shifted := TRUE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_UP";
+	                            #GenerateApple := TRUE;
+	                        ELSE
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_NONE";
+	                        END_IF;
+	                        //Set the new direction to check for snake movement
+	                        #DirectionToCheck := "DIRECTION_DOWN";
+	                        #LengthIndexToCheck := #SnakeHeadLengthIndex;
+	                        #HeightIndexToCheck := #SnakeHeadHeightIndex;
+	                        //And update the new snake head indexes
+	                        #SnakeHeadHeightIndex := #SnakeHeadHeightIndex + 1;
+	                        
+	                    END_IF;
+	                    
+	                END_REGION
+	                
+	            ELSIF #SnakeDirection = "DIRECTION_DOWN" THEN
+	                
+	                REGION Down direction
+	                    
+	                    //Check wall collision
+	                    IF (#SnakeHeadHeightIndex - 1) < 1 THEN
+	                        #CollisionWithWall := TRUE;
+	                        "DB_Commands".Sts.GameActive := FALSE;
+	                    ELSE
+	                        //Check collision with other snake parts
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex - 1, #SnakeHeadLengthIndex].SnakePresence THEN
+	                            #CollisionWithSnake := TRUE;
+	                            "DB_Commands".Sts.GameActive := FALSE;
+	                        END_IF;
+	                    END_IF;
+	                    
+	                    //Move if we have no collisions
+	                    IF NOT #CollisionWithWall AND NOT #CollisionWithSnake THEN
+	                        //Right direction starting with the head
+	                        //Shift snake head
+	                        "DB_Field".Field[#SnakeHeadHeightIndex - 1, #SnakeHeadLengthIndex].SnakePresence := "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex - 1, #SnakeHeadLengthIndex].Shifted := TRUE;
+	                        "DB_Field".Field[#SnakeHeadHeightIndex - 1, #SnakeHeadLengthIndex].PreviousDirection := #PreviousDirection := "DIRECTION_DOWN";
+	                        //If apple presence in the block then don't delete the snake presence to create the new block
+	                        IF "DB_Field".Field[#SnakeHeadHeightIndex - 1, #SnakeHeadLengthIndex].ApplePresence THEN
+	                            "DB_Field".Field[#SnakeHeadHeightIndex - 1, #SnakeHeadLengthIndex].ApplePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].Shifted := TRUE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_DOWN";
+	                            #GenerateApple := TRUE;
+	                        ELSE
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].SnakePresence := FALSE;
+	                            "DB_Field".Field[#SnakeHeadHeightIndex, #SnakeHeadLengthIndex].PreviousDirection := "DIRECTION_NONE";
+	                        END_IF;
+	                        //Set the new direction to check for snake movement
+	                        #DirectionToCheck := "DIRECTION_UP";
+	                        #LengthIndexToCheck := #SnakeHeadLengthIndex;
+	                        #HeightIndexToCheck := #SnakeHeadHeightIndex;
+	                        //And update the new snake head indexes
+	                        #SnakeHeadHeightIndex := #SnakeHeadHeightIndex - 1;
+	                        
+	                    END_IF;
+	                    
+	                END_REGION
+	                
+	            END_IF;
+	            
+	            REGION Snake shifts
+	                
+	                IF NOT #CollisionWithWall AND NOT #CollisionWithSnake AND NOT #GenerateApple THEN
+	                    
+	                    WHILE #DirectionToCheck <> "DIRECTION_NONE" DO
+	                        
+	                        //Check the left direction
+	                        IF #DirectionToCheck = "DIRECTION_LEFT" THEN
+	                            FOR #IndexLength := (#LengthIndexToCheck - 1) TO 1 BY -1 DO
+	                                IF "DB_Field".Field[#HeightIndexToCheck, #IndexLength].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck, #IndexLength].Shifted AND
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength].PreviousDirection <> "DIRECTION_LEFT" THEN
+	                                    
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength + 1].SnakePresence := "DB_Field".Field[#HeightIndexToCheck, #IndexLength].SnakePresence;
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength + 1].PreviousDirection := #PreviousDirection;
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength + 1].Shifted := TRUE;
+	                                    
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength].SnakePresence := FALSE;
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength].PreviousDirection := "DIRECTION_NONE";
+	                                    #LengthIndexToCheck := #IndexLength;
+	                                ELSE
+	                                    EXIT;
+	                                END_IF;
+	                            END_FOR;
+	                            //When the shift is finished check the other directions
+	                            #DirectionToCheck := "DIRECTION_NONE";
+	                            //Check up
+	                            IF (#HeightIndexToCheck + 1) <= "FIELD_HEIGHT" THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck + 1, #LengthIndexToCheck].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck + 1, #LengthIndexToCheck].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_UP";
+	                                    #PreviousDirection := "DIRECTION_DOWN";
+	                                END_IF;
+	                            END_IF;
+	                            //Check down
+	                            IF (#HeightIndexToCheck - 1) >= 1 THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck - 1, #LengthIndexToCheck].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck - 1, #LengthIndexToCheck].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_DOWN";
+	                                    #PreviousDirection := "DIRECTION_UP";
+	                                END_IF;
+	                            END_IF;
+	                            
+	                            //Check the right direction
+	                        ELSIF #DirectionToCheck = "DIRECTION_RIGHT" THEN
+	                            FOR #IndexLength := (#LengthIndexToCheck + 1) TO "FIELD_LENGTH" DO
+	                                IF "DB_Field".Field[#HeightIndexToCheck, #IndexLength].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck, #IndexLength].Shifted AND
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength].PreviousDirection <> "DIRECTION_RIGHT" THEN
+	                                    
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength - 1].SnakePresence := "DB_Field".Field[#HeightIndexToCheck, #IndexLength].SnakePresence;
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength - 1].PreviousDirection := #PreviousDirection;
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength - 1].Shifted := TRUE;
+	                                    
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength].SnakePresence := FALSE;
+	                                    "DB_Field".Field[#HeightIndexToCheck, #IndexLength].PreviousDirection := "DIRECTION_NONE";
+	                                    #LengthIndexToCheck := #IndexLength;
+	                                ELSE
+	                                    EXIT;
+	                                END_IF;
+	                            END_FOR;
+	                            //When the shift is finished check the other directions
+	                            #DirectionToCheck := "DIRECTION_NONE";
+	                            //Check up
+	                            IF (#HeightIndexToCheck + 1) <= "FIELD_HEIGHT" THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck + 1, #LengthIndexToCheck].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck + 1, #LengthIndexToCheck].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_UP";
+	                                    #PreviousDirection := "DIRECTION_DOWN";
+	                                END_IF;
+	                            END_IF;
+	                            //Check down
+	                            IF (#HeightIndexToCheck - 1) >= 1 THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck - 1, #LengthIndexToCheck].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck - 1, #LengthIndexToCheck].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_DOWN";
+	                                    #PreviousDirection := "DIRECTION_UP";
+	                                END_IF;
+	                            END_IF;
+	                            
+	                            //Check the down direction
+	                        ELSIF #DirectionToCheck = "DIRECTION_DOWN" THEN
+	                            FOR #IndexHeight := (#HeightIndexToCheck - 1) TO 1 BY -1 DO
+	                                IF "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].SnakePresence AND
+	                                    NOT "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].Shifted AND
+	                                    "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].PreviousDirection <> "DIRECTION_DOWN" THEN
+	                                    
+	                                    "DB_Field".Field[#IndexHeight + 1, #LengthIndexToCheck].SnakePresence := "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].SnakePresence;
+	                                    "DB_Field".Field[#IndexHeight + 1, #LengthIndexToCheck].PreviousDirection := #PreviousDirection;
+	                                    "DB_Field".Field[#IndexHeight + 1, #LengthIndexToCheck].Shifted := TRUE;
+	                                    
+	                                    "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].SnakePresence := FALSE;
+	                                    "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].PreviousDirection := "DIRECTION_NONE";
+	                                    #HeightIndexToCheck := #IndexHeight;
+	                                ELSE
+	                                    EXIT;
+	                                END_IF;
+	                            END_FOR;
+	                            //When the shift is finished check the other directions
+	                            #DirectionToCheck := "DIRECTION_NONE";
+	                            //Check left
+	                            IF (#LengthIndexToCheck - 1) >= 1 THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck - 1].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck - 1].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_LEFT";
+	                                    #PreviousDirection := "DIRECTION_RIGHT";
+	                                END_IF;
+	                            END_IF;
+	                            //Check down
+	                            IF (#LengthIndexToCheck + 1) <= "FIELD_LENGTH" THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck + 1].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck + 1].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_RIGHT";
+	                                    #PreviousDirection := "DIRECTION_LEFT";
+	                                END_IF;
+	                            END_IF;
+	                            
+	                            //Check the up direction
+	                        ELSIF #DirectionToCheck = "DIRECTION_UP" THEN
+	                            FOR #IndexHeight := (#HeightIndexToCheck + 1) TO "FIELD_HEIGHT" DO
+	                                IF "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].SnakePresence AND
+	                                    NOT "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].Shifted AND
+	                                    "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].PreviousDirection <> "DIRECTION_UP" THEN
+	                                    
+	                                    "DB_Field".Field[#IndexHeight - 1, #LengthIndexToCheck].SnakePresence := "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].SnakePresence;
+	                                    "DB_Field".Field[#IndexHeight - 1, #LengthIndexToCheck].PreviousDirection := #PreviousDirection;
+	                                    "DB_Field".Field[#IndexHeight - 1, #LengthIndexToCheck].Shifted := TRUE;
+	                                    
+	                                    "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].SnakePresence := FALSE;
+	                                    "DB_Field".Field[#IndexHeight, #LengthIndexToCheck].PreviousDirection := "DIRECTION_NONE";
+	                                    #HeightIndexToCheck := #IndexHeight;
+	                                ELSE
+	                                    EXIT;
+	                                END_IF;
+	                            END_FOR;
+	                            //When the shift is finished check the other directions
+	                            #DirectionToCheck := "DIRECTION_NONE";
+	                            //Check left
+	                            IF (#LengthIndexToCheck - 1) >= 1 THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck - 1].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck - 1].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_LEFT";
+	                                    #PreviousDirection := "DIRECTION_RIGHT";
+	                                END_IF;
+	                            END_IF;
+	                            //Check down
+	                            IF (#LengthIndexToCheck + 1) <= "FIELD_LENGTH" THEN
+	                                IF "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck + 1].SnakePresence AND
+	                                    NOT "DB_Field".Field[#HeightIndexToCheck, #LengthIndexToCheck + 1].Shifted THEN
+	                                    #DirectionToCheck := "DIRECTION_RIGHT";
+	                                    #PreviousDirection := "DIRECTION_LEFT";
+	                                END_IF;
+	                            END_IF;
+	                        END_IF;
+	                        
+	                    END_WHILE;
+	                    
+	                END_IF;
+	                
+	            END_REGION
+	            
+	            REGION Check for new apple generation
+	                
+	                IF #GenerateApple THEN
+	                    
+	                    //Increase score
+	                    "DB_Commands".Points.Actual := "DB_Commands".Points.Actual + #PointsToAdd;
+	                    
+	                    //Generate random number for apple creation
+	                    #RandomAppleHeight := "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_HEIGHT");
+	                    #RandomAppleLength := "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_LENGTH");
+	                    
+	                    //Check if the numbers set are not already a snake block
+	                    WHILE "DB_Field".Field[#RandomAppleHeight, #RandomAppleLength].SnakePresence DO
+	                        //First time checking
+	                        IF NOT "DB_Field".Field[#RandomAppleHeight, #RandomAppleLength].SnakePresence THEN
+	                            EXIT;
+	                        END_IF;
+	                        
+	                        //If there's the snake then change indexes
+	                        #RandomAppleHeight := #RandomAppleHeight + "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_HEIGHT");
+	                        #RandomAppleHeight := #RandomAppleHeight MOD "FIELD_HEIGHT";
+	                        #RandomAppleLength := #RandomAppleLength + "FC_RandomGen"(LowerLimit := 1, UpperLimit := "FIELD_LENGTH");
+	                        #RandomAppleLength := #RandomAppleLength MOD "FIELD_LENGTH";
+	                        
+	                    END_WHILE;
+	                    
+	                    //Set apple presence
+	                    "DB_Field".Field[#RandomAppleHeight, #RandomAppleLength].ApplePresence := TRUE;
+	                    
+	                END_IF;
+	                
+	            END_REGION
+	            
+	        END_IF;
+	        
+	    END_REGION
+	    
+	    REGION Snake length calculation
+	        
+	        "DB_Commands".Sts.SnakeLength := 0;
+	        FOR #IndexHeight := 1 TO "FIELD_HEIGHT" DO
+	            FOR #IndexLength := 1 TO "FIELD_LENGTH" DO
+	                IF "DB_Field".Field[#IndexHeight, #IndexLength].SnakePresence THEN
+	                    "DB_Commands".Sts.SnakeLength := "DB_Commands".Sts.SnakeLength + 1;
+	                END_IF;
+	            END_FOR;
+	        END_FOR;
+	        
+	    END_REGION
+	    
+	    REGION Check for game end to score points
+	        
+	        #Fn_GameStart(CLK := "DB_Commands".Sts.GameActive);
+	        
+	        IF #Fn_GameStart.Q THEN
+	            "DB_Commands".Points.LastGame := "DB_Commands".Points.Actual;
+	            IF "DB_Commands".Points.LastGame > "DB_Commands".Points.BestGame THEN
+	                "DB_Commands".Points.BestGame := "DB_Commands".Points.LastGame;
+	            END_IF;
+	            IF "DB_Commands".Sts.SnakeLength > "DB_Commands".Points.BestLength THEN
+	                "DB_Commands".Points.BestLength := "DB_Commands".Sts.SnakeLength;
+	            END_IF;
+	        END_IF;
+	        
+	    END_REGION
+	    
+	END_REGION
+END_FUNCTION_BLOCK
+
